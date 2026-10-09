@@ -15,12 +15,14 @@ from semantic_sql.safety import UnsafeQueryError, prepare_query
 
 DEFAULT_MAX_ROWS = 100
 DEFAULT_MAX_RESULT_CHARS = 20_000
+DEFAULT_SEMANTIC_DIR = "semantic"
 
 INSTRUCTIONS = """\
 Read-only access to an analytical SQL database.
-Before writing SQL, read the semantic catalog in semantic/ (metrics, entities, examples)
-and prefer definitions with Status: approved. Use describe_table to confirm columns.
-Write SQL in the dialect reported by list_tables.
+Call list_tables first: it reports the SQL dialect and the semantic layer directory
+(local Markdown files). Before writing SQL, read them (metrics, entities, examples) and prefer
+definitions with Status: approved. Use describe_table to confirm columns.
+Use table names exactly as list_tables shows them (schema-qualified if shown that way).
 """
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False)
@@ -33,23 +35,31 @@ def get_database() -> Database:
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise ToolError("DATABASE_URL is not set. Copy .env.example to .env and fill it in.")
-    return Database.from_url(url, schema=os.environ.get("DATABASE_SCHEMA") or None)
+    schemas = [s.strip() for s in os.environ.get("DATABASE_SCHEMAS", "").split(",") if s.strip()]
+    return Database.from_url(url, schemas=schemas)
+
+
+def semantic_dir() -> str:
+    return (os.environ.get("SEMANTIC_DIR") or DEFAULT_SEMANTIC_DIR).rstrip("/")
 
 
 @mcp.tool(annotations=READ_ONLY)
 def list_tables() -> str:
-    """List tables and views in the database, with comments, and the SQL dialect to use."""
+    """List tables and views, the SQL dialect, and the semantic layer directory (local Markdown)."""
     db = get_database()
     try:
         tables = db.list_tables()
     except SQLAlchemyError as e:
         raise ToolError(f"Could not list tables: {_error_message(e)}") from e
-    return format_tables(db.dialect, tables)
+    return format_tables(db.dialect, semantic_dir(), tables)
 
 
 @mcp.tool(annotations=READ_ONLY)
 def describe_table(table: str) -> str:
-    """Describe one table: columns, types, nullability, keys, relationships and comments."""
+    """Describe one table: columns, types, nullability, keys, relationships and comments.
+
+    Pass the table name exactly as list_tables shows it (e.g. ``schema.table``).
+    """
     db = get_database()
     try:
         info = db.describe_table(table)
@@ -83,9 +93,13 @@ def run_query(sql: str) -> str:
     return truncate(text, _int_env("MAX_RESULT_CHARS", DEFAULT_MAX_RESULT_CHARS))
 
 
-def format_tables(dialect: str, tables: list[tuple[str, str | None]]) -> str:
-    lines = [f"dialect: {dialect}", "tables:"]
-    lines += [f"  {name}" + (f"  -- {comment}" if comment else "") for name, comment in tables]
+def format_tables(dialect: str, semantic_layer_dir: str, tables: list[str]) -> str:
+    lines = [
+        f"dialect: {dialect}",
+        f"semantic layer (local Markdown files): {semantic_layer_dir}/",
+        "tables:",
+    ]
+    lines += [f"  {name}" for name in tables]
     return "\n".join(lines)
 
 

@@ -1,5 +1,6 @@
 {
   // Long prose lines are fine; wrapping makes diffs noisier.
   "config": { "MD013": false },
-  "ignores": [".venv/**", "node_modules/**"]
+  // Slash-command files are prompt bodies, not documents.
+  "ignores": [".venv/**", "**/node_modules/**", ".claude/commands/**", ".opencode/commands/**"]
 }

@@ -32,7 +32,32 @@ def test_list_tables(mcp_server):
     result = call(mcp_server, "list_tables")
 
     assert not result.is_error
-    assert text_of(result) == "dialect: sqlite\ntables:\n  customers\n  orders"
+    assert text_of(result).splitlines() == [
+        "dialect: sqlite",
+        "semantic layer (local Markdown files): semantic/",
+        "tables:",
+        "  customers",
+        "  orders",
+    ]
+
+
+def test_list_tables_reports_configured_schemas_and_semantic_dir(mcp_server, monkeypatch):
+    monkeypatch.setenv("DATABASE_SCHEMAS", " main , ")
+    monkeypatch.setenv("SEMANTIC_DIR", "semantic/demo/")
+    server.get_database.cache_clear()
+
+    result = call(mcp_server, "list_tables")
+
+    assert text_of(result).splitlines() == [
+        "dialect: sqlite",
+        "semantic layer (local Markdown files): semantic/demo/",
+        "tables:",
+        "  main.customers",
+        "  main.orders",
+    ]
+    described = call(mcp_server, "describe_table", {"table": "main.orders"})
+    assert not described.is_error
+    assert text_of(described).startswith("main.orders  (dialect: sqlite)")
 
 
 def test_describe_table(mcp_server):

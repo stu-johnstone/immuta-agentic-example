@@ -10,9 +10,9 @@ The goal is to prove this workflow:
 
 1. Connect to a SQL warehouse.
 2. Inspect its schema.
-3. Have an LLM generate a proposed semantic catalog.
-4. Allow a human to review/edit the catalog.
-5. Give the semantic catalog and live database schema to an AI agent.
+3. Have an LLM generate a proposed semantic layer.
+4. Allow a human to review/edit the semantic layer.
+5. Give the semantic layer and live database schema to an AI agent.
 6. Let the agent generate and execute read-only SQL.
 7. Return useful results and explanations.
 
@@ -29,7 +29,7 @@ The only custom code is a **small, warehouse-neutral MCP server** (a few hundred
 - **No vendor MCP servers** (no Databricks/Snowflake/Google-managed MCP). One server works the same way for every warehouse.
 - **Vendor code is limited to standard SQL drivers** (SQLAlchemy dialects), selected by connection URL.
 - **Semantic layer:** plain Markdown in Git, read directly by the agent.
-- **Catalog generation:** a prompt run by the coding agent itself — no custom LLM-calling code.
+- **Semantic layer generation:** a prompt run by the coding agent itself — no custom LLM-calling code.
 - **Review/approval:** Git diff and code review.
 
 ### 2. Keep it simple
@@ -47,7 +47,9 @@ A developer should be able to understand the whole project in an afternoon.
 
 ### 3. Separate semantics from the physical database
 
-The semantic catalog describes entities, tables, columns, relationships, metrics, business definitions, example questions and example SQL.
+**Terminology:** the *semantic layer* is the set of local Markdown files in `semantic/<dataset>/`. *Catalog* only ever means a warehouse catalog (e.g. Databricks Unity Catalog). Generating the semantic layer writes local files and never changes the database.
+
+The semantic layer describes entities, tables, columns, relationships, metrics, business definitions, example questions and example SQL.
 
 It must **not** be tied to a particular warehouse. Warehouse specifics live only in the connection URL and SQL dialect.
 
@@ -83,6 +85,18 @@ Do not assume every dialect implements every SQLAlchemy feature. For example, `d
 
 ---
 
+## Datasets
+
+| Dataset | Database | Schemas | Semantic layer | Status |
+| --- | --- | --- | --- | --- |
+| Demo | SQLite (`demo/seed.sql`) | default | `semantic/demo/` | Working |
+| Harbourstone Financial | Databricks (catalog set by `DATABRICKS_CATALOG`) | `retail_banking`, `commercial_banking`, `insurance` | `semantic/harbourstone_financial/` | **Current focus** |
+| Harbourstone HR / Marketing | Redshift / BigQuery | — | — | Later |
+
+Harbourstone data is loaded into the warehouses separately; this repository neither contains nor loads it. Everything the agent knows comes from the **live schema** (via MCP) and the reviewed semantic layer. The tables use bronze/silver/gold layers, have table and column comments (including PII markers), and **no declared primary/foreign keys** — relationships are recorded in the semantic layer.
+
+---
+
 ## Architecture
 
 ```text
@@ -90,7 +104,7 @@ Do not assume every dialect implements every SQLAlchemy feature. For example, `d
                    |               |
         reads files|               | MCP (stdio)
                    v               v
-         semantic/*.md        semantic-sql MCP server
+  semantic/<dataset>/*.md     semantic-sql MCP server
          (meaning)            (schema + read-only SQL)
                                    |
                                    | SQLAlchemy + dialect
@@ -101,10 +115,10 @@ Do not assume every dialect implements every SQLAlchemy feature. For example, `d
 - The **semantic layer** answers *"What does 'revenue' mean?"*
 - The **schema** (via MCP) answers *"Where does the data live?"*
 
-### Workflow A: Generate the semantic catalog
+### Workflow A: Generate the semantic layer
 
 ```text
-MCP schema tools -> coding agent + prompts/generate-catalog.md -> semantic/*.md (proposed) -> human review -> git commit
+MCP schema tools -> coding agent + prompts/generate-semantic-layer.md -> semantic/<dataset>/*.md (proposed) -> human review -> git commit
 ```
 
 ### Workflow B: Query the database
@@ -114,7 +128,7 @@ User question
    |
    v
 Claude Code / OpenCode
-   +--> reads semantic/*.md
+   +--> reads semantic/<dataset>/*.md (directory reported by list_tables)
    +--> MCP: list_tables / describe_table
    |
    v
@@ -134,6 +148,10 @@ Generated SQL -> MCP: run_query (read-only) -> Results + explanation
 ├── .env.example              # Committed template; copy to .env (git-ignored)
 ├── .mcp.json                 # Claude Code -> semantic-sql MCP server
 ├── opencode.json             # OpenCode   -> semantic-sql MCP server
+├── .claude/
+│   ├── settings.json         # Pre-approves the three read-only MCP tools
+│   └── commands/generate-semantic-layer.md
+├── .opencode/commands/generate-semantic-layer.md
 ├── src/
 │   └── semantic_sql/
 │       ├── __init__.py
@@ -142,15 +160,15 @@ Generated SQL -> MCP: run_query (read-only) -> Results + explanation
 │       └── safety.py         # sqlglot SELECT-only check + LIMIT
 ├── tests/
 ├── semantic/
-│   ├── README.md             # Catalog format, status rules, dialect
-│   ├── entities/
-│   │   ├── customers.md
-│   │   └── orders.md
-│   ├── metrics.md
-│   ├── glossary.md
-│   └── examples.md
+│   ├── README.md             # Semantic layer format and rules (shared by all datasets)
+│   ├── demo/                 # One semantic layer per dataset, selected by SEMANTIC_DIR
+│   │   ├── entities/
+│   │   ├── metrics.md
+│   │   ├── glossary.md
+│   │   └── examples.md
+│   └── harbourstone_financial/
 ├── prompts/
-│   └── generate-catalog.md
+│   └── generate-semantic-layer.md
 └── demo/
     └── seed.sql              # customers/orders demo data
 ```
@@ -167,8 +185,8 @@ Expose a small number of tools — not dozens.
 
 | Tool | Input | Returns |
 | --- | --- | --- |
-| `list_tables` | — | Table names (with comments where available) and the SQL dialect |
-| `describe_table` | `table` | Columns, types, nullability, primary key, foreign keys, table/column comments |
+| `list_tables` | — | SQL dialect, semantic layer directory, and table/view names (`schema.table` when `DATABASE_SCHEMAS` is set) |
+| `describe_table` | `table` (as shown by `list_tables`) | Columns, types, nullability, primary key, foreign keys, table/column comments |
 | `run_query` | `sql` | Column names, rows, row count, whether results were truncated |
 
 Output must be compact and LLM-friendly, for example:
@@ -182,7 +200,9 @@ orders  (dialect: databricks)
   created_at: timestamp
 ```
 
-Prefer `describe_table` per table over dumping the entire schema into context. **Keep table and column comments** — they are valuable input for the semantic catalog.
+Prefer `describe_table` per table over dumping the entire schema into context. **Keep table and column comments** — they are valuable input for the semantic layer.
+
+`list_tables` deliberately returns names only: some dialects (e.g. Databricks) need one round trip per table to fetch comments, which is too slow for large schemas. `describe_table` returns comments.
 
 ### Configuration
 
@@ -190,8 +210,9 @@ All configuration comes from environment variables. The server loads them from a
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `DATABASE_URL` | SQLAlchemy URL (e.g. `databricks://...`, `sqlite:///demo/demo.db`) | required |
-| `DATABASE_SCHEMA` | Schema to introspect | dialect default |
+| `DATABASE_URL` | SQLAlchemy URL (e.g. `databricks://...`, `sqlite:///demo/demo.db`). For Databricks, `.env` builds it from `DATABRICKS_HOST`, `DATABRICKS_HTTP_PATH`, `DATABRICKS_CATALOG` and `DATABRICKS_TOKEN` using python-dotenv `${VAR}` expansion | required |
+| `DATABASE_SCHEMAS` | Comma-separated schemas to expose; table names become `schema.table` | connection default schema |
+| `SEMANTIC_DIR` | Semantic semantic layer directory for this dataset, reported by `list_tables` | `semantic` |
 | `MAX_ROWS` | Maximum rows returned by `run_query` | `100` |
 | `MAX_RESULT_CHARS` | Maximum size of a `run_query` response | `20000` |
 
@@ -220,7 +241,7 @@ Safety layers, in priority order:
 
 ## SQL Dialect
 
-`list_tables` reports the dialect (e.g. `databricks`), and `semantic/README.md` states it too.
+`list_tables` reports the dialect (e.g. `databricks`).
 
 Dialect matters for date arithmetic, timestamp handling, functions, identifier quoting, casting, array/struct syntax and approximate aggregations.
 
@@ -228,20 +249,22 @@ Do not build a universal SQL dialect abstraction. Let the LLM generate dialect-s
 
 ---
 
-## Semantic Catalog (Markdown)
+## Semantic Layer (Markdown)
 
 Use Markdown because it is easy for humans and LLMs to read, edit and diff, and coding agents can read it without extra tooling.
 
 ### Rules
 
-- One file per entity in `semantic/entities/`, plus `metrics.md`, `glossary.md` and `examples.md`.
+- One semantic layer directory per dataset: `semantic/<dataset>/`, selected by `SEMANTIC_DIR`.
+- One file per entity in `<semantic-dir>/entities/` (named `<schema>.<table>.md` when names are qualified), plus `metrics.md`, `glossary.md` and `examples.md`.
+- **Never copy personal or sensitive data values** into the semantic layer — it is committed to Git. Describe columns instead, and record sensitivity stated in column comments.
 - Always include the **physical** table and column names in backticks.
 - Every definition has a `Status:` of `proposed` or `approved`.
 - Keep descriptions concise. Record ambiguities under an **Open questions** heading.
-- No credentials or connection details in the catalog.
+- No credentials or connection details in the semantic layer.
 - The exact format can evolve. Do not over-design it.
 
-### Example entity: `semantic/entities/orders.md`
+### Example entity: `semantic/demo/entities/orders.md`
 
 ```markdown
 # Order
@@ -271,7 +294,7 @@ A purchase made by a customer.
 - Which values can `status` take besides `completed` and `cancelled`?
 ```
 
-### Example metric: `semantic/metrics.md`
+### Example metric: `semantic/demo/metrics.md`
 
 ````markdown
 ## Revenue
@@ -284,7 +307,7 @@ SUM(orders.total) -- WHERE orders.status = 'completed'
 ```
 ````
 
-### Example query: `semantic/examples.md`
+### Example query: `semantic/demo/examples.md`
 
 ````markdown
 ## What was revenue last month?
@@ -299,7 +322,7 @@ WHERE status = 'completed'
 
 ### Inferred vs. approved
 
-The catalog generated by an LLM is **not** automatically authoritative.
+The semantic layer generated by an LLM is **not** automatically authoritative.
 
 - Everything generated starts as `Status: proposed`.
 - Humans edit the Markdown and change definitions to `Status: approved`.
@@ -308,32 +331,35 @@ The catalog generated by an LLM is **not** automatically authoritative.
 
 ---
 
-## Semantic Catalog Generation
+## Semantic Layer Generation
 
-There is no custom CLI or LLM code. Generation is a prompt run by the coding agent:
+There is no custom CLI or LLM code. Generation is a prompt run by the coding agent, exposed as a `/generate-semantic-layer` slash command (`.claude/commands/` and `.opencode/commands/`) that tells the agent to follow `prompts/generate-semantic-layer.md`:
 
 ```text
-Follow prompts/generate-catalog.md
+/generate-semantic-layer
 ```
 
 The agent should:
 
 1. Use `list_tables` and `describe_table` to inspect the schema.
 2. Propose table/column descriptions, entities, relationships, metrics, business terminology, example questions and example SQL.
-3. Write the result to `semantic/` following the [catalog format](#semantic-catalog-markdown).
+3. Write the result to the semantic layer directory reported by `list_tables`, following the [semantic layer format](#semantic-layer-markdown).
 4. Mark everything as `Status: proposed`.
 
 ### Prompt requirements
 
-`prompts/generate-catalog.md` must tell the agent that:
+`prompts/generate-semantic-layer.md` must tell the agent that:
 
 - It is inspecting an unfamiliar database.
 - It must not invent facts.
 - It should distinguish observations from guesses.
 - It should use actual schema relationships and comments when available.
+- For large or layered datasets, it should cover gold tables first, then silver, and describe bronze briefly.
+- When no foreign keys are declared, it should infer relationships from column names and mark them as inferred.
+- It must never copy personal or sensitive data values into the semantic layer.
 - It may propose useful definitions, but those require human review.
 - It should prefer concise descriptions.
-- It must follow the Markdown catalog format.
+- It must follow the Markdown semantic layer format.
 - It must include the underlying physical table/column names.
 - It should list ambiguities under **Open questions**.
 - It must only run small, read-only sampling queries, if any.
@@ -343,7 +369,7 @@ Example prompt:
 ```text
 You are analyzing an unfamiliar analytical database.
 
-Your job is to create a proposed semantic catalog as Markdown files in semantic/.
+Your job is to create a proposed semantic layer as Markdown files in the semantic layer directory reported by list_tables.
 
 Use the database schema from the MCP tools as your primary source of truth.
 
@@ -369,7 +395,7 @@ The result will be reviewed by a human before being used.
 The PoC does **not** need a UI:
 
 ```bash
-git diff semantic/
+git diff semantic/<dataset>/
 # review, edit, change Status to approved where appropriate
 git commit
 ```
@@ -384,7 +410,7 @@ When the agent receives a question such as:
 
 it should:
 
-1. Read the relevant files in `semantic/` (metrics, entities, examples).
+1. Read the relevant files in the semantic layer directory reported by `list_tables` (metrics, entities, examples).
 2. Use `describe_table` to confirm the tables and columns it needs.
 3. Identify the required joins.
 4. Generate dialect-specific SQL.
@@ -401,6 +427,7 @@ The normal test suite must **not** require a live warehouse. Use SQLite and the 
 At minimum, test:
 
 - `list_tables` and `describe_table` output (including PK/FK and comments where SQLite allows).
+- Multiple schemas (`DATABASE_SCHEMAS`), using SQLite `ATTACH DATABASE`.
 - `run_query` returns columns, rows and row count.
 - `MAX_ROWS` and `MAX_RESULT_CHARS` are enforced.
 - Mutating and non-`SELECT` statements are rejected (`INSERT`, `DELETE`, `DROP`, `MERGE`, `GRANT`, …).
@@ -434,18 +461,18 @@ The README should eventually demonstrate:
 
 ```console
 $ sqlite3 demo/demo.db < demo/seed.sql
-$ export DATABASE_URL=sqlite:///demo/demo.db
+$ cp .env.example .env     # demo block: DATABASE_URL + SEMANTIC_DIR=semantic/demo
 
 # In Claude Code / OpenCode (MCP server configured in .mcp.json / opencode.json):
-> Follow prompts/generate-catalog.md
+> /generate-semantic-layer
 
-$ git diff semantic/        # review, edit, approve
+$ git diff semantic/demo/   # review, edit, approve
 $ git commit
 
 > What was revenue by customer segment last month?
 ```
 
-Then point `DATABASE_URL` at Databricks and ask the same question **without changing `semantic/`** (assuming the same logical tables exist).
+Then point `DATABASE_URL` at Databricks and ask the same question **without changing the semantic layer** (assuming the same logical tables exist).
 
 ---
 
@@ -481,7 +508,7 @@ If the PoC works, possible future improvements include:
 - Query examples generated from actual data
 - SQL cost estimation
 - Automatic discovery of common joins
-- Automated catalog reference checking
+- Automated semantic layer reference checking
 - Human review UI
 - Query/evaluation test suites
 - Business glossary
@@ -497,8 +524,8 @@ The PoC is successful when:
 
 - [ ] 1. The MCP server connects to Databricks with a read-only service principal.
 - [ ] 2. The agent discovers the schema through `list_tables` / `describe_table`.
-- [ ] 3. The agent generates a proposed Markdown semantic catalog.
-- [ ] 4. A human reviews/edits the catalog in Git.
+- [ ] 3. The agent generates a proposed Markdown semantic layer.
+- [ ] 4. A human reviews/edits the semantic layer in Git.
 - [ ] 5. Claude Code or OpenCode is connected to the MCP server.
 - [ ] 6. A natural-language analytical question is asked.
 - [ ] 7. The agent reads the semantic definitions.
@@ -508,6 +535,6 @@ The PoC is successful when:
 - [ ] 11. The agent explains the result and the definitions it used.
 - [ ] 12. Mutating SQL is rejected by both the server and the database.
 
-**The most important demonstration:** the same semantic catalog, MCP server and agent workflow remain unchanged when `DATABASE_URL` is switched between warehouses (SQLite -> Databricks, later others).
+**The most important demonstration:** the same semantic layer, MCP server and agent workflow remain unchanged when `DATABASE_URL` is switched between warehouses (SQLite -> Databricks, later others).
 
 Keep everything boring, explicit, and easy to replace.

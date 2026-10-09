@@ -46,13 +46,19 @@ class QueryResult:
 
 
 class Database:
-    def __init__(self, engine: Engine, schema: str | None = None):
+    """A database, optionally limited to a list of schemas.
+
+    With no schemas, the connection's default schema is used and table names are
+    unqualified. With schemas, table names are qualified as ``schema.table``.
+    """
+
+    def __init__(self, engine: Engine, schemas: list[str] | None = None):
         self.engine = engine
-        self.schema = schema
+        self.schemas = list(schemas or [])
 
     @classmethod
-    def from_url(cls, url: str, schema: str | None = None) -> "Database":
-        return cls(create_engine(url), schema)
+    def from_url(cls, url: str, schemas: list[str] | None = None) -> "Database":
+        return cls(create_engine(url), schemas)
 
     @property
     def dialect(self) -> str:
@@ -60,15 +66,24 @@ class Database:
         name = self.engine.dialect.name
         return _SQLGLOT_DIALECTS.get(name, name)
 
-    def list_tables(self) -> list[tuple[str, str | None]]:
-        """Return ``(name, comment)`` for every table and view in the schema."""
+    def list_tables(self) -> list[str]:
+        """Return table and view names, qualified as ``schema.table`` if schemas are set.
+
+        Comments are deliberately not fetched here: some dialects (e.g. Databricks) need
+        one round trip per table. ``describe_table`` returns them.
+        """
         inspector = inspect(self.engine)
-        names = set(inspector.get_table_names(schema=self.schema))
-        names.update(_optional(inspector.get_view_names, [], schema=self.schema))
-        return [(name, self._table_comment(inspector, name)) for name in sorted(names)]
+        if not self.schemas:
+            return sorted(_table_and_view_names(inspector, None))
+        return [
+            f"{schema}.{name}"
+            for schema in self.schemas
+            for name in sorted(_table_and_view_names(inspector, schema))
+        ]
 
     def describe_table(self, table: str) -> TableInfo:
-        """Return columns, keys and comments for one table."""
+        """Return columns, keys and comments for one table (``table`` or ``schema.table``)."""
+        schema, name = self._split_name(table)
         inspector = inspect(self.engine)
         columns = [
             Column(
@@ -77,19 +92,20 @@ class Database:
                 nullable=bool(c.get("nullable", True)),
                 comment=c.get("comment") or None,
             )
-            for c in inspector.get_columns(table, schema=self.schema)
+            for c in inspector.get_columns(name, schema=schema)
         ]
-        pk = _optional(inspector.get_pk_constraint, {}, table, schema=self.schema)
-        fks = _optional(inspector.get_foreign_keys, [], table, schema=self.schema)
+        pk = _optional(inspector.get_pk_constraint, {}, name, schema=schema)
+        fks = _optional(inspector.get_foreign_keys, [], name, schema=schema)
+        comment = _optional(inspector.get_table_comment, {}, name, schema=schema)
         return TableInfo(
             name=table,
-            comment=self._table_comment(inspector, table),
+            comment=comment.get("text") or None,
             columns=columns,
             primary_key=list(pk.get("constrained_columns") or []),
             foreign_keys=[
                 ForeignKey(
                     columns=list(fk["constrained_columns"]),
-                    referred_table=fk["referred_table"],
+                    referred_table=_qualify(fk.get("referred_schema"), fk["referred_table"]),
                     referred_columns=list(fk["referred_columns"]),
                 )
                 for fk in fks
@@ -112,9 +128,21 @@ class Database:
             result.close()
         return QueryResult(columns=columns, rows=rows[:max_rows], truncated=len(rows) > max_rows)
 
-    def _table_comment(self, inspector: Any, table: str) -> str | None:
-        comment = _optional(inspector.get_table_comment, {}, table, schema=self.schema)
-        return comment.get("text") or None
+    def _split_name(self, table: str) -> tuple[str | None, str]:
+        if "." in table:
+            schema, name = table.rsplit(".", 1)
+            return schema, name
+        return (self.schemas[0] if len(self.schemas) == 1 else None), table
+
+
+def _table_and_view_names(inspector: Any, schema: str | None) -> set[str]:
+    names = set(inspector.get_table_names(schema=schema))
+    names.update(_optional(inspector.get_view_names, [], schema=schema))
+    return names
+
+
+def _qualify(schema: str | None, name: str) -> str:
+    return f"{schema}.{name}" if schema else name
 
 
 def _optional(method: Any, default: Any, *args: Any, **kwargs: Any) -> Any:

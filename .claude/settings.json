@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__semantic-sql__list_tables",
+      "mcp__semantic-sql__describe_table",
+      "mcp__semantic-sql__run_query"
+    ]
+  }
+}
