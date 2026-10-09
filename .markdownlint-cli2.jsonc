@@ -1,0 +1,5 @@
+{
+  // Long prose lines are fine; wrapping makes diffs noisier.
+  "config": { "MD013": false },
+  "ignores": [".venv/**", "node_modules/**"]
+}

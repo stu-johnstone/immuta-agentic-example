@@ -1,0 +1,38 @@
+[project]
+name = "semantic-sql"
+version = "0.1.0"
+description = "Warehouse-neutral MCP server for read-only SQL, used with a Markdown semantic layer."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3,<3",
+    "python-dotenv>=1.2",
+    "sqlalchemy>=2.0",
+    "sqlglot>=30",
+]
+
+[project.optional-dependencies]
+databricks = ["databricks-sqlalchemy>=2.0.10"]
+
+[project.scripts]
+semantic-sql-mcp = "semantic_sql.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
